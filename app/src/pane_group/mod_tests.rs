@@ -3320,3 +3320,82 @@ fn decide_remote_child_hydration_empty_token_falls_back() {
         );
     }
 }
+
+#[test]
+fn test_floating_toggle_creates_offtree_terminal() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let _flag = FeatureFlag::FloatingTerminalPane.override_enabled(true);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let initial_tree = panes.pane_count();
+            assert!(panes.floating_pane.is_none());
+
+            panes.toggle_floating(ctx);
+
+            let fp_id = panes.floating_pane_id().expect("floating pane should be created");
+            // Lives in pane_contents but not in the tiled tree, so the tree count is unchanged.
+            assert!(panes.has_pane_id(fp_id));
+            assert!(!panes.panes.is_pane_in_tree(fp_id));
+            assert_eq!(panes.pane_count(), initial_tree);
+            assert!(panes.floating_pane.as_ref().unwrap().visible);
+            assert_eq!(panes.focused_pane_id(ctx), fp_id);
+
+            // Toggling again hides it (not pinned) and moves focus off the float.
+            panes.toggle_floating(ctx);
+            assert!(!panes.floating_pane.as_ref().unwrap().visible);
+            assert_ne!(panes.focused_pane_id(ctx), fp_id);
+        });
+    });
+}
+
+#[test]
+fn test_floating_close_removes_and_refocuses_tiled() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let _flag = FeatureFlag::FloatingTerminalPane.override_enabled(true);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let tiled = get_newly_created_pane_id(panes, &[]);
+            panes.toggle_floating(ctx);
+            let fp_id = panes.floating_pane_id().unwrap();
+            assert!(panes.has_pane_id(fp_id));
+
+            panes.close_floating_pane(ctx);
+            assert!(panes.floating_pane.is_none());
+            assert!(!panes.has_pane_id(fp_id));
+            // Focus returns to the remaining tiled pane.
+            assert_eq!(panes.focused_pane_id(ctx), tiled);
+        });
+    });
+}
+
+#[test]
+fn test_floating_embed_roundtrip() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let _flag = FeatureFlag::FloatingTerminalPane.override_enabled(true);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let first = get_newly_created_pane_id(panes, &[]);
+            panes.add_terminal_pane(Direction::Left, None, ctx);
+            let second = get_newly_created_pane_id(panes, &[first]);
+            assert_eq!(panes.pane_count(), 2);
+
+            // Pop the second pane out of the tree into the floating slot.
+            panes.float_tiled_pane(second, ctx);
+            assert_eq!(panes.floating_pane_id(), Some(second));
+            assert!(!panes.panes.is_pane_in_tree(second));
+            assert_eq!(panes.pane_count(), 1);
+
+            // Embedding it back restores the tiled tree.
+            panes.embed_floating_pane(Direction::Right, ctx);
+            assert!(panes.floating_pane.is_none());
+            assert!(panes.panes.is_pane_in_tree(second));
+            assert_eq!(panes.pane_count(), 2);
+        });
+    });
+}

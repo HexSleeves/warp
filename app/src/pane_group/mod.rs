@@ -30,9 +30,12 @@ use warp_util::path::convert_wsl_to_windows_host_path;
 #[cfg(feature = "local_fs")]
 use warp_util::path::LineAndColumnArg;
 use warp_util::remote_path::RemotePath;
+use warpui::color::ColorU;
 use warpui::elements::{
-    ChildView, Clipped, CrossAxisAlignment, DispatchEventResult, Element, EventHandler, Flex,
-    MainAxisSize, ParentElement, Shrinkable, Stack,
+    Align, Border, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container, CornerRadius,
+    CrossAxisAlignment, DispatchEventResult, Element, Empty, EventHandler, Flex, MainAxisSize,
+    OffsetPositioning, ParentAnchor, ParentElement, ParentOffsetBounds, Radius, Shrinkable, Stack,
+    Text,
 };
 use warpui::keymap::{Context, EditableBinding, FixedBinding};
 use warpui::notification::NotificationSendError;
@@ -303,6 +306,30 @@ pub enum PaneGroupAction {
     ToggleMaximizePane,
     HandleFocusChange,
     FocusTerminalView(EntityId),
+    // Floating terminal pane (gated behind FeatureFlag::FloatingTerminalPane).
+    /// Toggle the floating pane: create one if none exists, otherwise flip visibility.
+    ToggleFloating,
+    /// Close (terminate) the floating pane.
+    CloseFloating,
+    /// Toggle the floating pane's pinned (always-on-top) state.
+    ToggleFloatingPin,
+    /// Pop the given tiled leaf pane out of the tree into the floating slot.
+    FloatPane(PaneId),
+    /// Embed the floating pane back into the tiled tree, split from the focused pane.
+    EmbedFloating(Direction),
+    /// Keyboard entry point: embed the float if one exists, otherwise float the
+    /// currently focused tiled pane.
+    ToggleEmbedFloat,
+    /// Mouse drag of the title bar: payload is the absolute cursor position.
+    FloatingMove(Vector2F),
+    /// Mouse drag of the resize handle: payload is the absolute cursor position.
+    FloatingResize(Vector2F),
+    /// End an in-progress floating move/resize drag.
+    FloatingDragEnd,
+    /// Move the floating pane one keyboard step in a direction.
+    FloatingMoveStep(Direction),
+    /// Resize the floating pane one keyboard step in a direction.
+    FloatingResizeStep(Direction),
 }
 #[derive(PartialEq)]
 enum PaneRemovalReason {
@@ -471,6 +498,105 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("PaneGroup") & !id!("PaneGroup_PaneDragging"))
         .with_custom_action(CustomAction::ToggleMaximizePane),
+    ]);
+
+    // Floating terminal pane bindings (gated behind FeatureFlag::FloatingTerminalPane).
+    app.register_editable_bindings([
+        EditableBinding::new(
+            "pane_group:toggle_floating",
+            "Toggle floating terminal pane",
+            PaneGroupAction::ToggleFloating,
+        )
+        .with_key_binding("alt-f")
+        .with_context_predicate(id!("PaneGroup") & !id!("PaneGroup_PaneDragging"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:toggle_embed_float",
+            "Embed or float the focused pane",
+            PaneGroupAction::ToggleEmbedFloat,
+        )
+        .with_key_binding("cmdorctrl-alt-e")
+        .with_context_predicate(id!("PaneGroup") & !id!("PaneGroup_PaneDragging"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:toggle_floating_pin",
+            "Pin/unpin the floating pane",
+            PaneGroupAction::ToggleFloatingPin,
+        )
+        .with_key_binding("alt-p")
+        .with_context_predicate(id!("PaneGroup_FloatingFocused"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:close_floating",
+            "Close the floating pane",
+            PaneGroupAction::CloseFloating,
+        )
+        .with_context_predicate(id!("PaneGroup_FloatingFocused"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:floating_move_left",
+            "Move floating pane left",
+            PaneGroupAction::FloatingMoveStep(Direction::Left),
+        )
+        .with_key_binding("alt-shift-left")
+        .with_context_predicate(id!("PaneGroup_FloatingFocused"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:floating_move_right",
+            "Move floating pane right",
+            PaneGroupAction::FloatingMoveStep(Direction::Right),
+        )
+        .with_key_binding("alt-shift-right")
+        .with_context_predicate(id!("PaneGroup_FloatingFocused"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:floating_move_up",
+            "Move floating pane up",
+            PaneGroupAction::FloatingMoveStep(Direction::Up),
+        )
+        .with_key_binding("alt-shift-up")
+        .with_context_predicate(id!("PaneGroup_FloatingFocused"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:floating_move_down",
+            "Move floating pane down",
+            PaneGroupAction::FloatingMoveStep(Direction::Down),
+        )
+        .with_key_binding("alt-shift-down")
+        .with_context_predicate(id!("PaneGroup_FloatingFocused"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:floating_resize_left",
+            "Shrink floating pane width",
+            PaneGroupAction::FloatingResizeStep(Direction::Left),
+        )
+        .with_key_binding("cmdorctrl-shift-left")
+        .with_context_predicate(id!("PaneGroup_FloatingFocused"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:floating_resize_right",
+            "Grow floating pane width",
+            PaneGroupAction::FloatingResizeStep(Direction::Right),
+        )
+        .with_key_binding("cmdorctrl-shift-right")
+        .with_context_predicate(id!("PaneGroup_FloatingFocused"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:floating_resize_up",
+            "Shrink floating pane height",
+            PaneGroupAction::FloatingResizeStep(Direction::Up),
+        )
+        .with_key_binding("cmdorctrl-shift-up")
+        .with_context_predicate(id!("PaneGroup_FloatingFocused"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
+        EditableBinding::new(
+            "pane_group:floating_resize_down",
+            "Grow floating pane height",
+            PaneGroupAction::FloatingResizeStep(Direction::Down),
+        )
+        .with_key_binding("cmdorctrl-shift-down")
+        .with_context_predicate(id!("PaneGroup_FloatingFocused"))
+        .with_enabled(|| FeatureFlag::FloatingTerminalPane.is_enabled()),
     ]);
 
     if ChannelState::channel() == Channel::Integration {
@@ -849,6 +975,48 @@ pub enum PaneDragDropLocation {
     Other,
 }
 
+/// Default dimensions for a newly created floating terminal pane, in pixels.
+const FLOATING_PANE_DEFAULT_WIDTH: f32 = 800.;
+const FLOATING_PANE_DEFAULT_HEIGHT: f32 = 480.;
+/// Height of the draggable title bar rendered atop a floating pane.
+const FLOATING_PANE_TITLE_BAR_HEIGHT: f32 = 28.;
+/// Edge length of the square resize handle in the bottom-right corner.
+const FLOATING_PANE_RESIZE_HANDLE_SIZE: f32 = 14.;
+/// Step in pixels for keyboard-driven move/resize of a floating pane.
+const FLOATING_PANE_KEYBOARD_STEP: f32 = 24.;
+
+/// Pixel delta for a one-step keyboard move/resize of a floating pane.
+fn direction_step_delta(direction: Direction) -> Vector2F {
+    match direction {
+        Direction::Left => vec2f(-FLOATING_PANE_KEYBOARD_STEP, 0.),
+        Direction::Right => vec2f(FLOATING_PANE_KEYBOARD_STEP, 0.),
+        Direction::Up => vec2f(0., -FLOATING_PANE_KEYBOARD_STEP),
+        Direction::Down => vec2f(0., FLOATING_PANE_KEYBOARD_STEP),
+    }
+}
+
+/// A single terminal pane that floats above the tiled pane layout (Zellij-style).
+///
+/// The pane's view lives in [`PaneGroup::pane_contents`] like any other pane, but
+/// its [`PaneId`] is deliberately kept out of [`PaneGroup::panes`] (the tiled tree)
+/// so it renders as a free-floating overlay positioned by `rect`.
+pub struct FloatingPane {
+    pane_id: PaneId,
+    /// Window-relative bounds (origin = top-left), in pixels.
+    rect: RectF,
+    /// Whether the pane is currently shown. A hidden floating pane keeps running.
+    visible: bool,
+    /// When pinned, the pane stays visible even when the floating layer is toggled off.
+    pinned: bool,
+}
+
+/// Which dimension a floating-pane mouse drag affects.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FloatingDragMode {
+    Move,
+    Resize,
+}
+
 pub struct PaneGroup {
     tips_completed: ModelHandle<TipsCompleted>,
     user_default_shell_unsupported_banner_model_handle: ModelHandle<BannerState>,
@@ -933,6 +1101,15 @@ pub struct PaneGroup {
 
     /// Tab-level custom title set via the rename-tab flow.
     custom_title: Option<String>,
+
+    /// The single floating terminal pane for this tab, if one exists.
+    /// Gated behind [`FeatureFlag::FloatingTerminalPane`]. Its view lives in
+    /// `pane_contents` but its id stays out of the tiled `panes` tree.
+    floating_pane: Option<FloatingPane>,
+
+    /// Last mouse position seen during an in-progress floating-pane drag, used
+    /// to derive a per-frame delta (mouse-dragged events report absolute coords).
+    floating_drag_anchor: Option<Vector2F>,
 }
 
 /// Origin metadata for a split-off child agent tab; used to re-adopt the
@@ -3093,6 +3270,8 @@ impl PaneGroup {
             transitively_shared_child_panes: HashMap::new(),
             child_agent_origin: None,
             custom_title: None,
+            floating_pane: None,
+            floating_drag_anchor: None,
         };
 
         // Notify any restored panes that they belong to this pane group.
@@ -7356,6 +7535,418 @@ impl PaneGroup {
         focused
     }
 
+    // ===== Floating terminal pane (FeatureFlag::FloatingTerminalPane) =====
+
+    /// The floating pane's id, if a floating pane currently exists.
+    pub fn floating_pane_id(&self) -> Option<PaneId> {
+        self.floating_pane.as_ref().map(|fp| fp.pane_id)
+    }
+
+    /// Whether the floating pane exists, is visible, and is the focused pane.
+    pub fn floating_pane_is_focused(&self, ctx: &AppContext) -> bool {
+        match &self.floating_pane {
+            Some(fp) => fp.visible && self.focused_pane_id(ctx) == fp.pane_id,
+            None => false,
+        }
+    }
+
+    /// The shell of the active session, used so a new floating terminal matches
+    /// the current session's shell (mirrors the `Add` action).
+    fn current_chosen_shell(&mut self, ctx: &mut ViewContext<Self>) -> Option<AvailableShell> {
+        if let Some(model) = self.active_session_terminal_model(ctx) {
+            let model = model.lock();
+            model.shell_launch_state().available_shell()
+        } else {
+            None
+        }
+    }
+
+    /// A centered default rect for a brand-new floating pane.
+    fn default_floating_rect(&mut self, ctx: &mut ViewContext<Self>) -> RectF {
+        let bounds = self.size(ctx);
+        let w = FLOATING_PANE_DEFAULT_WIDTH.min(bounds.x().max(1.));
+        let h = FLOATING_PANE_DEFAULT_HEIGHT.min(bounds.y().max(1.));
+        let x = ((bounds.x() - w) / 2.).max(0.);
+        let y = ((bounds.y() - h) / 2.).max(0.);
+        self.clamp_floating_rect(RectF::new(vec2f(x, y), vec2f(w, h)), ctx)
+    }
+
+    /// Clamp a floating rect so its size is at least the minimum pane size and
+    /// it stays fully within the pane group's bounds.
+    fn clamp_floating_rect(&self, rect: RectF, ctx: &mut ViewContext<Self>) -> RectF {
+        let min = get_minimum_pane_size(ctx);
+        let bounds = self.size(ctx);
+        let w = rect.width().clamp(min, bounds.x().max(min));
+        let h = rect.height().clamp(min, bounds.y().max(min));
+        let max_x = (bounds.x() - w).max(0.);
+        let max_y = (bounds.y() - h).max(0.);
+        let x = rect.origin().x().clamp(0., max_x);
+        let y = rect.origin().y().clamp(0., max_y);
+        RectF::new(vec2f(x, y), vec2f(w, h))
+    }
+
+    /// Toggle the floating pane: create one if none exists, otherwise flip its
+    /// visibility. A pinned pane always stays visible.
+    pub fn toggle_floating(&mut self, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::FloatingTerminalPane.is_enabled() {
+            return;
+        }
+        match &mut self.floating_pane {
+            None => self.create_floating_terminal(ctx),
+            Some(fp) => {
+                if fp.pinned {
+                    // Pinned panes are always shown; toggling instead focuses it.
+                    fp.visible = true;
+                    let id = fp.pane_id;
+                    self.focus_pane_by_id(id, ctx);
+                } else {
+                    fp.visible = !fp.visible;
+                    if fp.visible {
+                        let id = fp.pane_id;
+                        self.focus_pane_by_id(id, ctx);
+                    } else {
+                        self.refocus_a_tiled_pane(ctx);
+                    }
+                }
+                ctx.notify();
+                ctx.emit(Event::AppStateChanged);
+            }
+        }
+    }
+
+    /// Create a new floating terminal pane and show it.
+    fn create_floating_terminal(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.floating_pane.is_some() {
+            return;
+        }
+        let chosen_shell = self.current_chosen_shell(ctx);
+        let (pane_data, _view) = self.create_terminal_pane_data(
+            None,
+            HashMap::new(),
+            IsSharedSessionCreator::No,
+            chosen_shell,
+            None,
+            ctx,
+        );
+        // Insert into `pane_contents` only — deliberately not into the tiled tree.
+        let Some(pane_id) = self.init_pane(Box::new(pane_data), ctx) else {
+            log::error!("Failed to initialize floating terminal pane");
+            return;
+        };
+        let rect = self.default_floating_rect(ctx);
+        self.floating_pane = Some(FloatingPane {
+            pane_id,
+            rect,
+            visible: true,
+            pinned: false,
+        });
+        self.focus_pane_by_id(pane_id, ctx);
+        ctx.notify();
+        ctx.emit(Event::AppStateChanged);
+    }
+
+    /// Close (terminate) the floating pane, detaching it and removing it from
+    /// `pane_contents`. Never touches the tiled tree.
+    pub fn close_floating_pane(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(fp) = self.floating_pane.take() else {
+            return;
+        };
+        self.clean_up_pane(fp.pane_id, ctx);
+        self.pane_contents.remove(&fp.pane_id);
+        self.refocus_a_tiled_pane(ctx);
+        ctx.notify();
+        ctx.emit(Event::AppStateChanged);
+    }
+
+    /// Toggle the floating pane's pinned (always-on-top) state. Pinning forces
+    /// the pane visible.
+    pub fn toggle_floating_pin(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(fp) = &mut self.floating_pane {
+            fp.pinned = !fp.pinned;
+            if fp.pinned {
+                fp.visible = true;
+            }
+            ctx.notify();
+            ctx.emit(Event::AppStateChanged);
+        }
+    }
+
+    /// Pop a tiled terminal leaf out of the tree into the floating slot.
+    pub fn float_tiled_pane(&mut self, pane_id: PaneId, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::FloatingTerminalPane.is_enabled() {
+            return;
+        }
+        // Scope: terminal panes only, exactly one float, and never empty the tree.
+        if self.floating_pane.is_some()
+            || !pane_id.is_terminal_pane()
+            || self.panes.visible_pane_count() <= 1
+        {
+            return;
+        }
+        if !self.panes.remove(pane_id) {
+            log::error!("float_tiled_pane: pane {pane_id:?} not found in tree");
+            return;
+        }
+        self.handle_pane_count_change(ctx);
+        let rect = self.default_floating_rect(ctx);
+        self.floating_pane = Some(FloatingPane {
+            pane_id,
+            rect,
+            visible: true,
+            pinned: false,
+        });
+        self.focus_pane_by_id(pane_id, ctx);
+        ctx.notify();
+        ctx.emit(Event::AppStateChanged);
+    }
+
+    /// Embed the floating pane back into the tiled tree as a split of the
+    /// first visible tiled pane.
+    pub fn embed_floating_pane(&mut self, direction: Direction, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::FloatingTerminalPane.is_enabled() {
+            return;
+        }
+        let Some(fp) = self.floating_pane.take() else {
+            return;
+        };
+        let Some(base) = self.panes.visible_pane_ids().first().copied() else {
+            // No tiled pane to split from; keep it floating.
+            self.floating_pane = Some(fp);
+            return;
+        };
+        if !self.panes.split(base, fp.pane_id, direction) {
+            log::error!("embed_floating_pane: split failed");
+            self.floating_pane = Some(fp);
+            return;
+        }
+        self.handle_pane_count_change(ctx);
+        self.focus_pane_by_id(fp.pane_id, ctx);
+        ctx.notify();
+        ctx.emit(Event::AppStateChanged);
+    }
+
+    /// Translate the floating pane by a pixel delta, clamped within bounds.
+    fn floating_translate(&mut self, delta: Vector2F, ctx: &mut ViewContext<Self>) {
+        let Some(rect) = self.floating_pane.as_ref().map(|fp| fp.rect) else {
+            return;
+        };
+        let clamped = self.clamp_floating_rect(RectF::new(rect.origin() + delta, rect.size()), ctx);
+        if let Some(fp) = &mut self.floating_pane {
+            fp.rect = clamped;
+        }
+        ctx.notify();
+    }
+
+    /// Grow/shrink the floating pane by a pixel delta, clamped to min/window size.
+    fn floating_grow(&mut self, delta: Vector2F, ctx: &mut ViewContext<Self>) {
+        let Some(rect) = self.floating_pane.as_ref().map(|fp| fp.rect) else {
+            return;
+        };
+        let clamped = self.clamp_floating_rect(RectF::new(rect.origin(), rect.size() + delta), ctx);
+        if let Some(fp) = &mut self.floating_pane {
+            fp.rect = clamped;
+        }
+        ctx.notify();
+    }
+
+    /// Handle a mouse-drag of the floating frame. `position` is the absolute
+    /// cursor position; the per-frame delta is derived from a stored anchor.
+    pub fn floating_drag(
+        &mut self,
+        position: Vector2F,
+        mode: FloatingDragMode,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.floating_pane.is_none() {
+            return;
+        }
+        let delta = match self.floating_drag_anchor {
+            Some(anchor) => position - anchor,
+            // First drag event: establish the anchor, no movement yet.
+            None => Vector2F::zero(),
+        };
+        self.floating_drag_anchor = Some(position);
+        match mode {
+            FloatingDragMode::Move => self.floating_translate(delta, ctx),
+            FloatingDragMode::Resize => self.floating_grow(delta, ctx),
+        }
+    }
+
+    /// End an in-progress floating drag, clear the anchor, and persist position.
+    pub fn floating_drag_end(&mut self, ctx: &mut ViewContext<Self>) {
+        let was_dragging = self.floating_drag_anchor.take().is_some();
+        if was_dragging && self.floating_pane.is_some() {
+            ctx.emit(Event::AppStateChanged);
+        }
+    }
+
+    /// Move the floating pane one keyboard step in a direction.
+    pub fn floating_move_step(&mut self, direction: Direction, ctx: &mut ViewContext<Self>) {
+        self.floating_translate(direction_step_delta(direction), ctx);
+        if self.floating_pane.is_some() {
+            ctx.emit(Event::AppStateChanged);
+        }
+    }
+
+    /// Resize the floating pane one keyboard step in a direction.
+    pub fn floating_resize_step(&mut self, direction: Direction, ctx: &mut ViewContext<Self>) {
+        self.floating_grow(direction_step_delta(direction), ctx);
+        if self.floating_pane.is_some() {
+            ctx.emit(Event::AppStateChanged);
+        }
+    }
+
+    /// Focus a visible tiled pane (used after the floating pane is hidden/closed
+    /// while it held focus).
+    fn refocus_a_tiled_pane(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(id) = self.panes.visible_pane_ids().first().copied() {
+            self.focus_pane_by_id(id, ctx);
+        }
+    }
+
+    /// Build the floating pane overlay element and its absolute positioning,
+    /// or `None` if there is no visible floating pane.
+    fn render_floating_pane(
+        &self,
+        app: &AppContext,
+    ) -> Option<(Box<dyn Element>, OffsetPositioning)> {
+        let fp = self.floating_pane.as_ref()?;
+        if !fp.visible {
+            return None;
+        }
+
+        let appearance = Appearance::as_ref(app);
+        let theme = appearance.theme();
+        let font = appearance.ui_font_family();
+        let focused = self.floating_pane_is_focused(app);
+
+        let text_color: ColorU = theme.active_ui_text_color().into();
+        let dim_color: ColorU = theme.nonactive_ui_text_color().into();
+        let border_width = if focused { 2. } else { 1. };
+
+        // Small text button in the title bar.
+        let button = |label: &'static str, action: PaneGroupAction| -> Box<dyn Element> {
+            EventHandler::new(
+                Container::new(Text::new_inline(label, font, 11.).with_color(dim_color).finish())
+                    .with_padding_left(6.)
+                    .with_padding_right(6.)
+                    .finish(),
+            )
+            .on_left_mouse_up(move |ctx, _, _| {
+                ctx.dispatch_typed_action(action.clone());
+                DispatchEventResult::StopPropagation
+            })
+            .finish()
+        };
+
+        let mut title_row = Flex::row().with_cross_axis_alignment(CrossAxisAlignment::Center);
+        title_row.add_child(
+            Shrinkable::new(
+                1.0,
+                Align::new(
+                    Text::new_inline("Floating terminal", font, 12.)
+                        .with_color(text_color)
+                        .finish(),
+                )
+                .left()
+                .finish(),
+            )
+            .finish(),
+        );
+        title_row.add_child(button(
+            if fp.pinned { "unpin" } else { "pin" },
+            PaneGroupAction::ToggleFloatingPin,
+        ));
+        title_row.add_child(button(
+            "embed",
+            PaneGroupAction::EmbedFloating(Direction::Right),
+        ));
+        title_row.add_child(button("close", PaneGroupAction::CloseFloating));
+
+        let title_bar = EventHandler::new(
+            ConstrainedBox::new(
+                Container::new(title_row.finish())
+                    .with_background(theme.surface_2())
+                    .with_padding_left(8.)
+                    .with_padding_right(6.)
+                    .finish(),
+            )
+            .with_height(FLOATING_PANE_TITLE_BAR_HEIGHT)
+            .finish(),
+        )
+        .on_mouse_dragged(|ctx, _, position| {
+            ctx.dispatch_typed_action(PaneGroupAction::FloatingMove(position));
+            DispatchEventResult::StopPropagation
+        })
+        .on_left_mouse_up(|ctx, _, _| {
+            ctx.dispatch_typed_action(PaneGroupAction::FloatingDragEnd);
+            DispatchEventResult::StopPropagation
+        })
+        .finish();
+
+        let body_height = (fp.rect.height() - FLOATING_PANE_TITLE_BAR_HEIGHT).max(0.);
+        let body = ConstrainedBox::new(fp.pane_id.render(app))
+            .with_width(fp.rect.width())
+            .with_height(body_height)
+            .finish();
+
+        let border_fill = if focused {
+            theme.active_ui_text_color()
+        } else {
+            theme.outline()
+        };
+        let frame = Container::new(
+            Flex::column()
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(title_bar)
+                .with_child(body)
+                .finish(),
+        )
+        .with_background(theme.surface_2())
+        .with_border(Border::all(border_width).with_border_fill(border_fill))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
+        .finish();
+
+        // Bottom-right resize handle.
+        let handle = EventHandler::new(
+            ConstrainedBox::new(
+                Container::new(Empty::new().finish())
+                    .with_background(theme.outline())
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(2.)))
+                    .finish(),
+            )
+            .with_width(FLOATING_PANE_RESIZE_HANDLE_SIZE)
+            .with_height(FLOATING_PANE_RESIZE_HANDLE_SIZE)
+            .finish(),
+        )
+        .on_mouse_dragged(|ctx, _, position| {
+            ctx.dispatch_typed_action(PaneGroupAction::FloatingResize(position));
+            DispatchEventResult::StopPropagation
+        })
+        .on_left_mouse_up(|ctx, _, _| {
+            ctx.dispatch_typed_action(PaneGroupAction::FloatingDragEnd);
+            DispatchEventResult::StopPropagation
+        })
+        .finish();
+
+        let mut frame_stack = Stack::new();
+        frame_stack.add_child(frame);
+        frame_stack.add_child(Align::new(handle).bottom_right().finish());
+
+        let element = ConstrainedBox::new(frame_stack.finish())
+            .with_width(fp.rect.width())
+            .with_height(fp.rect.height())
+            .finish();
+
+        let positioning = OffsetPositioning::offset_from_parent(
+            fp.rect.origin(),
+            ParentOffsetBounds::ParentByPosition,
+            ParentAnchor::TopLeft,
+            ChildAnchor::TopLeft,
+        );
+        Some((element, positioning))
+    }
+
     pub fn terminal_manager(
         &self,
         pane_index: usize,
@@ -7824,6 +8415,26 @@ impl TypedActionView for PaneGroup {
             } => self.move_pane(*id, *target_pane_id, *direction, ctx),
             HandleFocusChange => self.handle_focus_change(ctx),
             FocusTerminalView(terminal_view_id) => self.focus_terminal_view(*terminal_view_id, ctx),
+            ToggleFloating => self.toggle_floating(ctx),
+            CloseFloating => self.close_floating_pane(ctx),
+            ToggleFloatingPin => self.toggle_floating_pin(ctx),
+            FloatPane(pane_id) => self.float_tiled_pane(*pane_id, ctx),
+            EmbedFloating(direction) => self.embed_floating_pane(*direction, ctx),
+            ToggleEmbedFloat => {
+                if self.floating_pane.is_some() {
+                    self.embed_floating_pane(Direction::Right, ctx);
+                } else {
+                    let focused = self.focused_pane_id(ctx);
+                    self.float_tiled_pane(focused, ctx);
+                }
+            }
+            FloatingMove(position) => self.floating_drag(*position, FloatingDragMode::Move, ctx),
+            FloatingResize(position) => {
+                self.floating_drag(*position, FloatingDragMode::Resize, ctx)
+            }
+            FloatingDragEnd => self.floating_drag_end(ctx),
+            FloatingMoveStep(direction) => self.floating_move_step(*direction, ctx),
+            FloatingResizeStep(direction) => self.floating_resize_step(*direction, ctx),
         }
     }
 }
@@ -7855,6 +8466,10 @@ impl View for PaneGroup {
                 ctx.set.insert("PaneGroup_MultiplePanes");
             }
         };
+
+        if self.floating_pane_is_focused(app) {
+            ctx.set.insert("PaneGroup_FloatingFocused");
+        }
 
         ctx
     }
@@ -7966,6 +8581,13 @@ impl View for PaneGroup {
                 })
             {
                 stack.add_child(ChildView::new(&handle).finish());
+            }
+        }
+
+        // Render the floating terminal pane above all tiled content.
+        if FeatureFlag::FloatingTerminalPane.is_enabled() {
+            if let Some((element, positioning)) = self.render_floating_pane(app) {
+                stack.add_positioned_overlay_child(element, positioning);
             }
         }
 

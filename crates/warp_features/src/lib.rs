@@ -157,6 +157,11 @@ pub enum FeatureFlag {
     /// Playground for reducing Warp UI clutter.
     MinimalistUI,
 
+    /// Enables a single floating terminal pane per tab that renders above the
+    /// tiled pane layout (Zellij-style): toggle, drag-move, resize, pin, and
+    /// embed/float conversion.
+    FloatingTerminalPane,
+
     /// Enables support for using native shell completions to supplement our
     /// completion specs.
     NativeShellCompletions,
@@ -950,6 +955,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::GPTConfigurableContextWindow,
     FeatureFlag::RestorePromptOnInlineModelSelectorSearch,
     FeatureFlag::WarpControlCli,
+    FeatureFlag::FloatingTerminalPane,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).
